@@ -23,16 +23,12 @@ type GeneratedDraft = {
   match_score: number
 }
 
-type GeneratedOutreachResult = {
-  drafts: GeneratedDraft[]
-  usedModel: string
-  fallbackReason?: string
-}
-
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
+
+const STANDARD_SIGNOFF = 'Thank you,\nBridge Team'
 
 function jsonResponse(body: Record<string, unknown>, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -44,15 +40,25 @@ function jsonResponse(body: Record<string, unknown>, status = 200) {
   })
 }
 
+function withStandardSignoff(emailBody: string) {
+  const trimmed = emailBody.trim()
+  const withoutExistingClosing = trimmed.replace(
+    /\n*(thanks|thank you|best|sincerely|regards)[\s\S]*$/i,
+    '',
+  )
+
+  return `${withoutExistingClosing.trim()}\n\n${STANDARD_SIGNOFF}`
+}
+
 function fallbackDrafts(requestText: string, volunteers: VolunteerInput[]): GeneratedDraft[] {
   return volunteers.map((volunteer) => ({
     volunteer_id: volunteer.id,
     email_subject: `Volunteer opportunity: ${requestText.slice(0, 60)}`,
-    email_body:
+    email_body: withStandardSignoff(
       `Hi ${volunteer.first_name},\n\n` +
-      `We think you could be a strong fit for this opportunity: "${requestText}".\n` +
-      `Would you be open to helping?\n\n` +
-      'Thank you,\nNonprofit Team',
+        `We think you could be a strong fit for this opportunity: "${requestText}".\n` +
+        'Would you be open to helping?',
+    ),
     match_score: 50,
   }))
 }
@@ -87,8 +93,8 @@ function normalizeGeneratedDrafts(
           : `Volunteer opportunity: ${requestText.slice(0, 60)}`,
       email_body:
         typeof draft.email_body === 'string' && draft.email_body.trim()
-          ? draft.email_body.trim()
-          : `Hi,\n\nWe think you could be a fit for: "${requestText}".\n\nThank you,\nNonprofit Team`,
+          ? withStandardSignoff(draft.email_body)
+          : withStandardSignoff(`Hi,\n\nWe think you could be a fit for: "${requestText}".`),
       match_score:
         typeof draft.match_score === 'number' && Number.isFinite(draft.match_score)
           ? Math.max(0, Math.min(100, draft.match_score))
@@ -106,10 +112,11 @@ function normalizeGeneratedDrafts(
       volunteer_id: volunteer.id,
       email_subject: `Volunteer opportunity: ${requestText.slice(0, 60)}`,
       email_body:
-        `Hi ${volunteer.first_name},\n\n` +
-        `We think you could be a strong fit for this opportunity: "${requestText}".\n` +
-        `Would you be open to helping?\n\n` +
-        'Thank you,\nNonprofit Team',
+        withStandardSignoff(
+          `Hi ${volunteer.first_name},\n\n` +
+            `We think you could be a strong fit for this opportunity: "${requestText}".\n` +
+            'Would you be open to helping?',
+        ),
       match_score: 50,
     }
   })
@@ -122,6 +129,7 @@ async function callGemini(
 ) {
   const prompt = [
     'You are helping a nonprofit coordinator write personalized outreach emails.',
+    `Every email_body must end with exactly:\n${STANDARD_SIGNOFF}`,
     'Return ONLY valid JSON with this shape:',
     '{"drafts":[{"volunteer_id":"...","email_subject":"...","email_body":"...","match_score":0-100}]}',
     'Do not include markdown code fences.',
@@ -252,12 +260,6 @@ Deno.serve(async (req) => {
 
   if (insertError) {
     return jsonResponse({ error: insertError.message }, 500)
-  }
-
-  const result: GeneratedOutreachResult = {
-    drafts: generatedDrafts,
-    usedModel,
-    fallbackReason,
   }
 
   return jsonResponse({

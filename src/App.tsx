@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import * as mammoth from 'mammoth'
 import { GlobalWorkerOptions, getDocument } from 'pdfjs-dist'
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
@@ -55,6 +55,35 @@ type ManagerRequestHistory = {
   outreach: OutreachHistoryItem[]
 }
 
+type RawOutreachVolunteer =
+  | {
+      first_name: string
+      last_name: string
+      email: string
+    }
+  | {
+      first_name: string
+      last_name: string
+      email: string
+    }[]
+  | null
+
+type RawOutreachMessage = {
+  id: string
+  email_subject: string
+  send_status: string
+  created_at: string
+  volunteers: RawOutreachVolunteer
+}
+
+type RawManagerRequest = {
+  id: string
+  request_text: string
+  status: string
+  created_at: string
+  outreach_messages: RawOutreachMessage[] | null
+}
+
 type SendFailure = {
   volunteerId: string
   error: string
@@ -86,6 +115,66 @@ type ParseResumeResult = {
   inferredAvailability?: string | null
   parseMethod?: 'gemini' | 'heuristic'
   fallbackReason?: string
+}
+
+const PAGE_LABELS: Record<Page, string> = {
+  landing: 'Overview',
+  volunteers: 'Volunteer Intake',
+  managers: 'Manager Console',
+}
+
+const HIGHLIGHTS = [
+  {
+    value: '29,000',
+    label: 'Nonprofit organizations across BC',
+  },
+  {
+    value: '86,000',
+    label: 'People employed in the sector',
+  },
+  {
+    value: '$6.7B',
+    label: 'Economic contribution to BC',
+  },
+]
+
+const CAPABILITIES = [
+  {
+    title: 'Volunteer intake',
+    description:
+      'Collect name, email, and resume, then enrich the profile automatically.',
+  },
+  {
+    title: 'Request capture',
+    description:
+      'Let program staff describe volunteer needs in plain language.',
+  },
+  {
+    title: 'Outreach workflow',
+    description:
+      'Review matches, generate outreach, and track request activity in one place.',
+  },
+]
+
+const STANDARD_SIGNOFF = 'Thank you,\nBridge Team'
+
+function formatDateTime(value: string) {
+  return new Date(value).toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  })
+}
+
+function withStandardSignoff(emailBody: string) {
+  const trimmed = emailBody.trim()
+  const withoutExistingClosing = trimmed.replace(
+    /\n*(thanks|thank you|best|best regards|kind regards|sincerely|regards)[\s\S]*$/i,
+    '',
+  )
+
+  return `${withoutExistingClosing.trim()}\n\n${STANDARD_SIGNOFF}`
 }
 
 function App() {
@@ -159,9 +248,9 @@ function App() {
       return
     }
 
-    const mappedRequests: ManagerRequestHistory[] = ((data as any[]) ?? []).map(
+    const mappedRequests: ManagerRequestHistory[] = ((data as RawManagerRequest[]) ?? []).map(
       (request) => {
-        const outreach = ((request.outreach_messages as any[]) ?? []).map((item) => {
+        const outreach = (request.outreach_messages ?? []).map((item) => {
           const volunteerData = Array.isArray(item.volunteers)
             ? item.volunteers[0] ?? null
             : item.volunteers ?? null
@@ -189,15 +278,17 @@ function App() {
     setIsLoadingManagerHistory(false)
   }
 
-  useEffect(() => {
-    if (page === 'volunteers') {
+  function handlePageChange(nextPage: Page) {
+    setPage(nextPage)
+
+    if (nextPage === 'volunteers') {
       void loadRecentVolunteers()
     }
 
-    if (page === 'managers') {
+    if (nextPage === 'managers') {
       void loadManagerHistory()
     }
-  }, [page])
+  }
 
   async function handleVolunteerSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -208,7 +299,6 @@ function App() {
       first_name: volunteerForm.first_name.trim(),
       last_name: volunteerForm.last_name.trim(),
       email: volunteerForm.email.trim().toLowerCase(),
-      // Keep compatibility with existing NOT NULL + UNIQUE schema until migration is applied.
       linkedin_url: `resume://${volunteerForm.email.trim().toLowerCase()}`,
     }
 
@@ -276,9 +366,7 @@ function App() {
       const availabilityText = parsed?.inferredAvailability
         ? ` Availability inferred: ${parsed.inferredAvailability}.`
         : ''
-      const methodText = parsed?.parseMethod
-        ? ` Method: ${parsed.parseMethod}.`
-        : ''
+      const methodText = parsed?.parseMethod ? ` Method: ${parsed.parseMethod}.` : ''
       const fallbackText = parsed?.fallbackReason
         ? ` Fallback reason: ${parsed.fallbackReason}`
         : ''
@@ -337,9 +425,7 @@ function App() {
     return file.text()
   }
 
-  function handleVolunteerFieldChange(
-    event: React.ChangeEvent<HTMLInputElement>,
-  ) {
+  function handleVolunteerFieldChange(event: React.ChangeEvent<HTMLInputElement>) {
     const { name, value } = event.target
     setVolunteerForm((previous) => ({
       ...previous,
@@ -444,7 +530,11 @@ function App() {
     setMatchedVolunteers(volunteers)
     setSelectedVolunteerIds(volunteers.map((volunteer) => volunteer.id))
     const firstDraft = aiResult.drafts[0]
-    setDraftPreview(firstDraft?.email_body ?? 'No draft generated yet.')
+    setDraftPreview(
+      firstDraft?.email_body
+        ? withStandardSignoff(firstDraft.email_body)
+        : 'No draft generated yet.',
+    )
     setManagerMessage(
       `Success: request saved and ${aiResult.generatedCount} draft(s) created using ${aiResult.usedModel}.${aiResult.fallbackReason ? ` Fallback reason: ${aiResult.fallbackReason}` : ''}`,
     )
@@ -532,255 +622,482 @@ function App() {
     return `${volunteer.first_name} ${volunteer.last_name}`
   }
 
+  const selectedCount = selectedVolunteerIds.length
+
   return (
-    <main>
-      <nav>
-        <button type="button" onClick={() => setPage('landing')}>
-          Landing
-        </button>
-        <button type="button" onClick={() => setPage('volunteers')}>
-          Volunteer Profile
-        </button>
-        <button type="button" onClick={() => setPage('managers')}>
-          Manager Console
-        </button>
-      </nav>
+    <main className="app-shell">
+      <div className="app-backdrop" />
+
+      <header className="topbar">
+        <div className="brand-lockup">
+          <div className="brand-logo-wrap" aria-hidden="true">
+            <img src="/sap-logo.png" alt="" className="brand-logo" />
+          </div>
+          <div>
+            <p className="eyebrow">Strengthening BC&apos;s Nonprofit Workforce</p>
+            <h1 className="brand-title">Bridge</h1>
+          </div>
+        </div>
+
+        <nav className="page-nav" aria-label="Primary">
+          {(Object.keys(PAGE_LABELS) as Page[]).map((key) => (
+            <button
+              key={key}
+              type="button"
+              className={`nav-button ${page === key ? 'is-active' : ''}`}
+              onClick={() => handlePageChange(key)}
+            >
+              {PAGE_LABELS[key]}
+            </button>
+          ))}
+        </nav>
+      </header>
 
       {page === 'landing' && (
-        <section>
-          <h1>AI Volunteer Coordinator</h1>
-          <p>
-            This application helps nonprofits find volunteers, contact them with
-            personalized emails, and manage responses in one place.
-          </p>
-          <p>
-            Volunteers only provide first name, last name, email, and LinkedIn profile
-            URL. The app uses the LinkedIn profile to pull the rest of the details.
-            Managers type what they need in plain language, and the system matches
-            people and prepares outreach.
-          </p>
+        <section className="page page-landing">
+          <section className="hero-card hero-card-clean">
+            <div className="hero-copy">
+              <p className="eyebrow">Overview</p>
+              <h2>Volunteer coordination for BC nonprofits.</h2>
+              <p className="hero-description">
+                Bridge gives nonprofit teams a simple workflow for intake, matching,
+                and outreach. The focus is operational clarity: fewer fields, fewer
+                steps, and a workspace that stays understandable for non-technical staff.
+              </p>
+            </div>
+
+            <div className="hero-actions hero-actions-compact">
+              <button
+                type="button"
+                className="button button-primary"
+                onClick={() => handlePageChange('managers')}
+              >
+                Open manager console
+              </button>
+              <button
+                type="button"
+                className="button button-secondary"
+                onClick={() => handlePageChange('volunteers')}
+              >
+                Review volunteer intake
+              </button>
+            </div>
+          </section>
+
+          <section className="surface-card">
+            <div className="stats-strip">
+              {HIGHLIGHTS.map((item) => (
+                <div key={item.label} className="stats-strip-item">
+                  <span>{item.label}</span>
+                  <strong>{item.value}</strong>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="surface-card">
+            <div className="overview-grid">
+              <div className="overview-block">
+                <div className="section-heading">
+                  <p className="eyebrow">Core functions</p>
+                  <h3>What the product does</h3>
+                </div>
+                <div className="compact-list">
+                  {CAPABILITIES.map((item) => (
+                    <article key={item.title} className="compact-item">
+                      <h4>{item.title}</h4>
+                      <p>{item.description}</p>
+                    </article>
+                  ))}
+                </div>
+              </div>
+
+              <div className="overview-block">
+                <div className="section-heading">
+                  <p className="eyebrow">Design principles</p>
+                  <h3>Why it fits the case</h3>
+                </div>
+                <div className="compact-list">
+                  <article className="compact-item">
+                    <h4>Minimal setup</h4>
+                    <p>Volunteers and staff only provide what is necessary to move work forward.</p>
+                  </article>
+                  <article className="compact-item">
+                    <h4>Accessible by default</h4>
+                    <p>Clear labels, steady spacing, and direct actions reduce friction on older devices.</p>
+                  </article>
+                  <article className="compact-item">
+                    <h4>Visible follow-through</h4>
+                    <p>Requests, draft outreach, and send outcomes remain in one workspace.</p>
+                  </article>
+                </div>
+              </div>
+            </div>
+          </section>
         </section>
       )}
 
       {page === 'volunteers' && (
-        <section>
-          <h1>Upload Your Resume</h1>
-          <p>
-            Volunteers enter the basics and upload a resume. The app parses the resume
-            to infer skills, location, and availability.
-          </p>
+        <section className="page page-detail">
+          <div className="page-intro page-intro-simple">
+            <div>
+              <p className="eyebrow">Volunteer experience</p>
+              <h2>Share your information in a few quick steps.</h2>
+              <p>
+                Enter your name and email, then upload your resume to create your
+                profile. Bridge uses that information to help the nonprofit understand
+                your skills, location, and availability without making you fill out a
+                longer form.
+              </p>
+            </div>
+            <p className="page-meta">Supports PDF, DOCX, TXT and files under 5 MB.</p>
+          </div>
 
-          <form onSubmit={handleVolunteerSubmit}>
-            <p>
-              <label>
-                First Name
-                <br />
-                <input
-                  type="text"
-                  name="first_name"
-                  value={volunteerForm.first_name}
-                  onChange={handleVolunteerFieldChange}
-                  required
-                />
-              </label>
-            </p>
+          <div className="content-grid content-grid-wide">
+            <section className="surface-card">
+              <div className="section-heading">
+                <h3>Create volunteer profile</h3>
+                <p>Keep the form lightweight and readable for first-time users.</p>
+              </div>
 
-            <p>
-              <label>
-                Last Name
-                <br />
-                <input
-                  type="text"
-                  name="last_name"
-                  value={volunteerForm.last_name}
-                  onChange={handleVolunteerFieldChange}
-                  required
-                />
-              </label>
-            </p>
+              <form className="form-grid" onSubmit={handleVolunteerSubmit}>
+                <label className="field">
+                  <span>First name</span>
+                  <input
+                    type="text"
+                    name="first_name"
+                    value={volunteerForm.first_name}
+                    onChange={handleVolunteerFieldChange}
+                    required
+                  />
+                </label>
 
-            <p>
-              <label>
-                Email
-                <br />
-                <input
-                  type="email"
-                  name="email"
-                  value={volunteerForm.email}
-                  onChange={handleVolunteerFieldChange}
-                  required
-                />
-              </label>
-            </p>
+                <label className="field">
+                  <span>Last name</span>
+                  <input
+                    type="text"
+                    name="last_name"
+                    value={volunteerForm.last_name}
+                    onChange={handleVolunteerFieldChange}
+                    required
+                  />
+                </label>
 
-            <p>
-              <label>
-                Resume File (.pdf, .docx, .txt)
-                <br />
-                <input
-                  key={resumeInputKey}
-                  type="file"
-                  accept=".txt,.md,.rtf,.pdf,.docx"
-                  onChange={handleResumeFileChange}
-                  required
-                />
-              </label>
-            </p>
+                <label className="field field-full">
+                  <span>Email</span>
+                  <input
+                    type="email"
+                    name="email"
+                    value={volunteerForm.email}
+                    onChange={handleVolunteerFieldChange}
+                    required
+                  />
+                </label>
 
-            <button type="submit" disabled={isSubmittingVolunteer}>
-              {isSubmittingVolunteer ? 'Saving...' : 'Save volunteer profile'}
-            </button>
+                <label className="field field-full">
+                  <span>Resume file</span>
+                  <input
+                    key={resumeInputKey}
+                    type="file"
+                    accept=".txt,.md,.rtf,.pdf,.docx"
+                    onChange={handleResumeFileChange}
+                    required
+                  />
+                  <small>Accepted: .pdf, .docx, .txt, .md, .rtf</small>
+                </label>
 
-            {volunteerSubmitMessage && <p>{volunteerSubmitMessage}</p>}
-          </form>
+                <div className="form-footer field-full">
+                  <button
+                    type="submit"
+                    className="button button-primary"
+                    disabled={isSubmittingVolunteer}
+                  >
+                    {isSubmittingVolunteer ? 'Saving profile...' : 'Save volunteer profile'}
+                  </button>
 
-          <h2>Recent Volunteers (from database)</h2>
-          {isLoadingRecentVolunteers && <p>Loading recent volunteers...</p>}
-          {recentVolunteersMessage && <p>{recentVolunteersMessage}</p>}
-          {!isLoadingRecentVolunteers && recentVolunteers.length === 0 && (
-            <p>No volunteers yet.</p>
-          )}
-          {recentVolunteers.length > 0 && (
-            <ul>
-              {recentVolunteers.map((volunteer) => (
-                <li key={volunteer.id}>
-                  <strong>
-                    {volunteer.first_name} {volunteer.last_name}
-                  </strong>{' '}
-                  - {volunteer.email} - {volunteer.skills.join(', ') || 'No skills yet'} -{' '}
-                  {volunteer.location ?? 'No location yet'}
-                </li>
-              ))}
-            </ul>
-          )}
+                  {volunteerSubmitMessage && (
+                    <p
+                      className={`status-message ${
+                        volunteerSubmitMessage.startsWith('Success')
+                          ? 'is-success'
+                          : 'is-error'
+                      }`}
+                    >
+                      {volunteerSubmitMessage}
+                    </p>
+                  )}
+                </div>
+              </form>
+            </section>
+
+            <aside className="surface-card">
+              <div className="section-heading">
+                <h3>Recent volunteer records</h3>
+                <p>Latest profiles saved to the database.</p>
+              </div>
+
+              {isLoadingRecentVolunteers && (
+                <p className="empty-state">Loading recent volunteers...</p>
+              )}
+              {recentVolunteersMessage && (
+                <p className="status-message is-error">{recentVolunteersMessage}</p>
+              )}
+              {!isLoadingRecentVolunteers && recentVolunteers.length === 0 && (
+                <p className="empty-state">No volunteers yet.</p>
+              )}
+
+              <div className="stack-list">
+                {recentVolunteers.map((volunteer) => (
+                  <article key={volunteer.id} className="record-card">
+                    <div className="record-header">
+                      <div>
+                        <h4>
+                          {volunteer.first_name} {volunteer.last_name}
+                        </h4>
+                        <p>{volunteer.email}</p>
+                      </div>
+                      <span className="record-time">
+                        {formatDateTime(volunteer.created_at)}
+                      </span>
+                    </div>
+                    <div className="pill-row">
+                      {(volunteer.skills.length > 0
+                        ? volunteer.skills
+                        : ['No skills parsed yet']
+                      ).map((skill) => (
+                        <span key={`${volunteer.id}-${skill}`} className="pill">
+                          {skill}
+                        </span>
+                      ))}
+                    </div>
+                    <p className="record-meta">
+                      <strong>Location:</strong> {volunteer.location ?? 'Not inferred yet'}
+                    </p>
+                  </article>
+                ))}
+              </div>
+            </aside>
+          </div>
         </section>
       )}
 
       {page === 'managers' && (
-        <section>
-          <h1>Manager Console</h1>
-          <p>
-            Managers type a request, the app generates a list of people to contact,
-            drafts a personalized email for each person, and then sends to everyone
-            in the list.
-          </p>
-          <p>
-            The draft email should be personalized for each matched person before it
-            is sent.
-          </p>
+        <section className="page page-detail">
+          <div className="page-intro page-intro-simple">
+            <div>
+              <p className="eyebrow">Coordinator workspace</p>
+              <h2>Find and contact the right volunteers.</h2>
+              <p>
+                Describe the support you need, review matched volunteers, and send
+                outreach from one place. Bridge keeps the process simple so you can
+                move quickly from request to contact.
+              </p>
+            </div>
+            <p className="page-meta">{selectedCount} volunteer(s) currently selected.</p>
+          </div>
 
-          <form onSubmit={handleManagerGenerate}>
-            <p>
-              <label>
-                Describe the volunteer need
-                <br />
-                <textarea
-                  name="request"
-                  rows={6}
-                  value={managerRequestText}
-                  onChange={(event) => setManagerRequestText(event.target.value)}
-                />
-              </label>
-            </p>
+          <div className="manager-layout">
+            <div className="manager-main">
+              <section className="surface-card">
+                <div className="section-heading">
+                  <h3>Describe the volunteer need</h3>
+                  <p>Use plain language. The system handles matching and draft creation.</p>
+                </div>
 
-            <button type="submit" disabled={isGeneratingMatches}>
-              {isGeneratingMatches ? 'Generating...' : 'Generate matched people'}
-            </button>
-
-            {managerMessage && <p>{managerMessage}</p>}
-          </form>
-
-          <h2>Matched People</h2>
-          <ul>
-            {matchedVolunteers.map((person) => {
-              const skillsText =
-                person.skills.length > 0 ? person.skills.join(', ') : 'No skills parsed yet'
-              return (
-                <li key={person.id}>
-                  <strong>
-                    {person.first_name} {person.last_name}
-                  </strong>{' '}
-                  - {skillsText} - {person.location ?? 'No location'} -{' '}
-                  {person.availability ?? 'No availability'}
-                  <br />
-                  <label>
-                    <input
-                      type="checkbox"
-                      checked={selectedVolunteerIds.includes(person.id)}
-                      onChange={() => handleToggleSelectedVolunteer(person.id)}
-                    />{' '}
-                    Select for sending
+                <form className="request-form" onSubmit={handleManagerGenerate}>
+                  <label className="field field-full">
+                    <span>Volunteer request</span>
+                    <textarea
+                      name="request"
+                      rows={6}
+                      value={managerRequestText}
+                      onChange={(event) => setManagerRequestText(event.target.value)}
+                    />
                   </label>
-                </li>
-              )
-            })}
-          </ul>
-          {matchedVolunteers.length === 0 && <p>No matches generated yet.</p>}
 
-          <h2>Draft Email</h2>
-          <p>{draftPreview || 'No draft generated yet.'}</p>
+                  <div className="form-footer">
+                    <button
+                      type="submit"
+                      className="button button-primary"
+                      disabled={isGeneratingMatches}
+                    >
+                      {isGeneratingMatches
+                        ? 'Generating matches...'
+                        : 'Generate matched people'}
+                    </button>
 
-          <h2>Recent Manager Activity</h2>
-          {isLoadingManagerHistory && <p>Loading manager history...</p>}
-          {managerHistoryMessage && <p>{managerHistoryMessage}</p>}
-          {!isLoadingManagerHistory && recentManagerRequests.length === 0 && (
-            <p>No manager requests yet.</p>
-          )}
-          {recentManagerRequests.length > 0 && (
-            <ul>
-              {recentManagerRequests.map((request) => (
-                <li key={request.id}>
-                  <p>
-                    <strong>Request:</strong> {request.request_text}
-                  </p>
-                  <p>
-                    <strong>Status:</strong> {request.status} | <strong>Drafts:</strong>{' '}
-                    {request.outreach.length}
-                  </p>
-                  {request.outreach.length > 0 && (
-                    <ul>
-                      {request.outreach.slice(0, 3).map((outreach) => {
-                        const volunteerName = outreach.volunteer
-                          ? `${outreach.volunteer.first_name} ${outreach.volunteer.last_name}`
-                          : 'Unknown volunteer'
+                    <button
+                      type="button"
+                      className="button button-secondary"
+                      onClick={handleSendSelectedMatched}
+                      disabled={
+                        isSendingOutreach ||
+                        !lastGeneratedRequestId ||
+                        selectedVolunteerIds.length === 0
+                      }
+                    >
+                      {isSendingOutreach
+                        ? 'Sending outreach...'
+                        : 'Send to selected people'}
+                    </button>
+                  </div>
 
-                        return (
-                          <li key={outreach.id}>
-                            {volunteerName} - {outreach.send_status} - {outreach.email_subject}
-                          </li>
-                        )
-                      })}
-                    </ul>
+                  {managerMessage && (
+                    <p
+                      className={`status-message ${
+                        managerMessage.startsWith('Success') || managerMessage.startsWith('Sent')
+                          ? 'is-success'
+                          : 'is-error'
+                      }`}
+                    >
+                      {managerMessage}
+                    </p>
                   )}
-                </li>
-              ))}
-            </ul>
-          )}
+                </form>
+              </section>
 
-          <button
-            type="button"
-            onClick={handleSendSelectedMatched}
-            disabled={
-              isSendingOutreach ||
-              !lastGeneratedRequestId ||
-              selectedVolunteerIds.length === 0
-            }
-          >
-            {isSendingOutreach ? 'Sending...' : 'Send to selected matched people'}
-          </button>
+              <section className="surface-card">
+                <div className="section-heading section-heading-inline">
+                  <div>
+                    <h3>Matched people</h3>
+                    <p>Review skills, availability, and outreach selection before sending.</p>
+                  </div>
+                  <span className="selection-chip">{selectedCount} selected</span>
+                </div>
 
-          {lastSendFailures.length > 0 && (
-            <>
-              <h2>Send Failures</h2>
-              <ul>
-                {lastSendFailures.map((failure) => (
-                  <li key={`${failure.volunteerId}-${failure.error}`}>
-                    {getVolunteerDisplayName(failure.volunteerId)} - {failure.error}
-                  </li>
-                ))}
-              </ul>
-            </>
-          )}
+                {matchedVolunteers.length === 0 && (
+                  <p className="empty-state">No matches generated yet.</p>
+                )}
+
+                <div className="stack-list">
+                  {matchedVolunteers.map((person) => {
+                    const skillsText =
+                      person.skills.length > 0 ? person.skills : ['No skills parsed yet']
+
+                    return (
+                      <article key={person.id} className="record-card">
+                        <div className="record-header">
+                          <div>
+                            <h4>
+                              {person.first_name} {person.last_name}
+                            </h4>
+                            <p>{person.email}</p>
+                          </div>
+                          <label className="select-toggle">
+                            <input
+                              type="checkbox"
+                              checked={selectedVolunteerIds.includes(person.id)}
+                              onChange={() => handleToggleSelectedVolunteer(person.id)}
+                            />
+                            <span>Select</span>
+                          </label>
+                        </div>
+
+                        <div className="pill-row">
+                          {skillsText.map((skill) => (
+                            <span key={`${person.id}-${skill}`} className="pill">
+                              {skill}
+                            </span>
+                          ))}
+                        </div>
+
+                        <p className="record-meta">
+                          <strong>Location:</strong> {person.location ?? 'Not available'}
+                        </p>
+                        <p className="record-meta">
+                          <strong>Availability:</strong>{' '}
+                          {person.availability ?? 'Not available'}
+                        </p>
+                      </article>
+                    )
+                  })}
+                </div>
+              </section>
+            </div>
+
+            <aside className="manager-sidebar">
+              <section className="surface-card">
+                <div className="section-heading">
+                  <h3>Draft email preview</h3>
+                  <p>Use this as the review baseline before outreach is sent.</p>
+                </div>
+                <div className="draft-card">
+                  <pre>{draftPreview || 'No draft generated yet.'}</pre>
+                </div>
+              </section>
+
+              <section className="surface-card">
+                <div className="section-heading">
+                  <h3>Recent manager activity</h3>
+                  <p>Recent requests and the outreach generated for them.</p>
+                </div>
+
+                {isLoadingManagerHistory && (
+                  <p className="empty-state">Loading manager history...</p>
+                )}
+                {managerHistoryMessage && (
+                  <p className="status-message is-error">{managerHistoryMessage}</p>
+                )}
+                {!isLoadingManagerHistory && recentManagerRequests.length === 0 && (
+                  <p className="empty-state">No manager requests yet.</p>
+                )}
+
+                <div className="stack-list">
+                  {recentManagerRequests.map((request) => (
+                    <article key={request.id} className="history-card">
+                      <div className="record-header">
+                        <h4>{request.request_text}</h4>
+                        <span className="record-time">
+                          {formatDateTime(request.created_at)}
+                        </span>
+                      </div>
+                      <div className="history-meta">
+                        <span className="status-pill">{request.status}</span>
+                        <span>{request.outreach.length} draft(s)</span>
+                      </div>
+                      {request.outreach.length > 0 && (
+                        <div className="history-list">
+                          {request.outreach.slice(0, 3).map((outreach) => {
+                            const volunteerName = outreach.volunteer
+                              ? `${outreach.volunteer.first_name} ${outreach.volunteer.last_name}`
+                              : 'Unknown volunteer'
+
+                            return (
+                              <div key={outreach.id} className="history-list-item">
+                                <strong>{volunteerName}</strong>
+                                <span>{outreach.send_status}</span>
+                                <p>{outreach.email_subject}</p>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      )}
+                    </article>
+                  ))}
+                </div>
+              </section>
+
+              {lastSendFailures.length > 0 && (
+                <section className="surface-card">
+                  <div className="section-heading">
+                    <h3>Send failures</h3>
+                    <p>These recipients remain selected so the coordinator can retry.</p>
+                  </div>
+                  <div className="stack-list">
+                    {lastSendFailures.map((failure) => (
+                      <article
+                        key={`${failure.volunteerId}-${failure.error}`}
+                        className="failure-card"
+                      >
+                        <h4>{getVolunteerDisplayName(failure.volunteerId)}</h4>
+                        <p>{failure.error}</p>
+                      </article>
+                    ))}
+                  </div>
+                </section>
+              )}
+            </aside>
+          </div>
         </section>
       )}
     </main>

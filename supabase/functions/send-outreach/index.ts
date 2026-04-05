@@ -23,6 +23,8 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
 
+const STANDARD_SIGNOFF = 'Thank you,\nBridge Team'
+
 function jsonResponse(body: Record<string, unknown>, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -31,6 +33,16 @@ function jsonResponse(body: Record<string, unknown>, status = 200) {
       'Content-Type': 'application/json',
     },
   })
+}
+
+function withStandardSignoff(emailBody: string) {
+  const trimmed = emailBody.trim()
+  const withoutExistingClosing = trimmed.replace(
+    /\n*(thanks|thank you|best|best regards|kind regards|sincerely|regards)[\s\S]*$/i,
+    '',
+  )
+
+  return `${withoutExistingClosing.trim()}\n\n${STANDARD_SIGNOFF}`
 }
 
 Deno.serve(async (req) => {
@@ -138,7 +150,7 @@ Deno.serve(async (req) => {
         from: resendFromEmail,
         to: [volunteerEmail],
         subject: draft.email_subject,
-        text: draft.email_body,
+        text: withStandardSignoff(draft.email_body),
       }),
     })
 

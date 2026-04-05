@@ -1,0 +1,63 @@
+:root {
+  font-family:
+    "Aptos",
+    "Segoe UI",
+    "Helvetica Neue",
+    Helvetica,
+    sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  color: #10243e;
+  background:
+    radial-gradient(circle at top left, rgba(113, 197, 255, 0.18), transparent 28%),
+    linear-gradient(180deg, #f5f9fc 0%, #eef4f8 100%);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+body,
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+button,
+input,
+textarea {
+  border-radius: 0;
+}
+
+button {
+  cursor: pointer;
+}
+
+img {
+  display: block;
+  max-width: 100%;
+}
+
+a {
+  color: inherit;
+}
+
+#root {
+  min-height: 100vh;
+}
