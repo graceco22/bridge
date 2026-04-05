@@ -1,6 +1,11 @@
 import { useEffect, useState } from 'react'
+import * as mammoth from 'mammoth'
+import { GlobalWorkerOptions, getDocument } from 'pdfjs-dist'
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import './App.css'
 import { supabase } from './lib/supabase'
+
+GlobalWorkerOptions.workerSrc = pdfWorkerUrl
 
 type Page = 'landing' | 'volunteers' | 'managers'
 
@@ -8,7 +13,6 @@ type VolunteerFormData = {
   first_name: string
   last_name: string
   email: string
-  linkedin_url: string
 }
 
 type VolunteerRecord = {
@@ -16,7 +20,8 @@ type VolunteerRecord = {
   first_name: string
   last_name: string
   email: string
-  linkedin_url: string
+  skills: string[]
+  location: string | null
   created_at: string
 }
 
@@ -50,14 +55,48 @@ type ManagerRequestHistory = {
   outreach: OutreachHistoryItem[]
 }
 
+type SendFailure = {
+  volunteerId: string
+  error: string
+}
+
+type SendOutreachResult = {
+  sentCount: number
+  failedCount: number
+  failures: SendFailure[]
+}
+
+type GeneratedDraft = {
+  volunteer_id: string
+  email_subject: string
+  email_body: string
+  match_score: number
+}
+
+type GenerateOutreachAiResult = {
+  generatedCount: number
+  drafts: GeneratedDraft[]
+  usedModel: string
+  fallbackReason?: string
+}
+
+type ParseResumeResult = {
+  inferredSkills?: string[]
+  inferredLocation?: string | null
+  inferredAvailability?: string | null
+  parseMethod?: 'gemini' | 'heuristic'
+  fallbackReason?: string
+}
+
 function App() {
   const [page, setPage] = useState<Page>('landing')
   const [volunteerForm, setVolunteerForm] = useState<VolunteerFormData>({
     first_name: '',
     last_name: '',
     email: '',
-    linkedin_url: '',
   })
+  const [resumeFile, setResumeFile] = useState<File | null>(null)
+  const [resumeInputKey, setResumeInputKey] = useState(0)
   const [isSubmittingVolunteer, setIsSubmittingVolunteer] = useState(false)
   const [volunteerSubmitMessage, setVolunteerSubmitMessage] = useState('')
   const [recentVolunteers, setRecentVolunteers] = useState<VolunteerRecord[]>([])
@@ -80,6 +119,7 @@ function App() {
   >([])
   const [isLoadingManagerHistory, setIsLoadingManagerHistory] = useState(false)
   const [managerHistoryMessage, setManagerHistoryMessage] = useState('')
+  const [lastSendFailures, setLastSendFailures] = useState<SendFailure[]>([])
 
   async function loadRecentVolunteers() {
     setIsLoadingRecentVolunteers(true)
@@ -87,7 +127,7 @@ function App() {
 
     const { data, error } = await supabase
       .from('volunteers')
-      .select('id, first_name, last_name, email, linkedin_url, created_at')
+      .select('id, first_name, last_name, email, skills, location, created_at')
       .order('created_at', { ascending: false })
       .limit(5)
 
@@ -168,26 +208,133 @@ function App() {
       first_name: volunteerForm.first_name.trim(),
       last_name: volunteerForm.last_name.trim(),
       email: volunteerForm.email.trim().toLowerCase(),
-      linkedin_url: volunteerForm.linkedin_url.trim(),
+      // Keep compatibility with existing NOT NULL + UNIQUE schema until migration is applied.
+      linkedin_url: `resume://${volunteerForm.email.trim().toLowerCase()}`,
     }
 
-    const { error } = await supabase.from('volunteers').insert(payload)
-
-    if (error) {
-      setVolunteerSubmitMessage(`Error: ${error.message}`)
+    if (!resumeFile) {
+      setVolunteerSubmitMessage('Error: Please upload a resume file.')
       setIsSubmittingVolunteer(false)
       return
     }
 
-    setVolunteerSubmitMessage('Success: volunteer profile saved.')
+    if (resumeFile.size > 5 * 1024 * 1024) {
+      setVolunteerSubmitMessage('Error: Resume file is too large. Use a file under 5 MB.')
+      setIsSubmittingVolunteer(false)
+      return
+    }
+
+    const resumeText = (await extractResumeText(resumeFile)).trim()
+    if (!resumeText) {
+      setVolunteerSubmitMessage('Error: Resume file appears empty or unreadable.')
+      setIsSubmittingVolunteer(false)
+      return
+    }
+
+    const { data: insertedVolunteer, error: insertError } = await supabase
+      .from('volunteers')
+      .insert(payload)
+      .select('id')
+      .single()
+
+    if (insertError || !insertedVolunteer) {
+      setVolunteerSubmitMessage(`Error: ${insertError?.message ?? 'Could not save profile.'}`)
+      setIsSubmittingVolunteer(false)
+      return
+    }
+
+    const { data: enrichmentData, error: enrichmentError } =
+      await supabase.functions.invoke('parse-resume', {
+        body: {
+          volunteerId: insertedVolunteer.id,
+          resumeText,
+          fileName: resumeFile.name,
+        },
+      })
+
+    let enrichmentMessage = 'Resume parsing completed.'
+    if (enrichmentError) {
+      let detailedMessage = enrichmentError.message
+      const context = (enrichmentError as { context?: Response }).context
+      if (context) {
+        try {
+          const details = (await context.json()) as { error?: string }
+          if (details.error) {
+            detailedMessage = details.error
+          }
+        } catch {
+          // Keep generic error message when no JSON body is available.
+        }
+      }
+      enrichmentMessage = `Resume parsing failed: ${detailedMessage}`
+    } else {
+      const parsed = (enrichmentData as ParseResumeResult | null) ?? null
+      const skillCount = parsed?.inferredSkills?.length ?? 0
+      const locationText = parsed?.inferredLocation
+        ? ` Location inferred: ${parsed.inferredLocation}.`
+        : ''
+      const availabilityText = parsed?.inferredAvailability
+        ? ` Availability inferred: ${parsed.inferredAvailability}.`
+        : ''
+      const methodText = parsed?.parseMethod
+        ? ` Method: ${parsed.parseMethod}.`
+        : ''
+      const fallbackText = parsed?.fallbackReason
+        ? ` Fallback reason: ${parsed.fallbackReason}`
+        : ''
+      enrichmentMessage = `Resume parsing completed. Skills inferred: ${skillCount}.${locationText}${availabilityText}${methodText}${fallbackText}`
+    }
+
+    setVolunteerSubmitMessage(`Success: volunteer profile saved. ${enrichmentMessage}`)
     setVolunteerForm({
       first_name: '',
       last_name: '',
       email: '',
-      linkedin_url: '',
     })
+    setResumeFile(null)
+    setResumeInputKey((previous) => previous + 1)
     await loadRecentVolunteers()
     setIsSubmittingVolunteer(false)
+  }
+
+  async function extractResumeText(file: File) {
+    const fileName = file.name.toLowerCase()
+
+    if (fileName.endsWith('.pdf') || file.type === 'application/pdf') {
+      const arrayBuffer = await file.arrayBuffer()
+      const pdf = await getDocument({ data: arrayBuffer }).promise
+      const pages: string[] = []
+
+      for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+        const page = await pdf.getPage(pageNumber)
+        const textContent = await page.getTextContent()
+        const pageText = textContent.items
+          .map((item) => {
+            if ('str' in item && typeof item.str === 'string') {
+              return item.str
+            }
+
+            return ''
+          })
+          .filter(Boolean)
+          .join(' ')
+
+        pages.push(pageText)
+      }
+
+      return pages.join('\n')
+    }
+
+    if (
+      fileName.endsWith('.docx') ||
+      file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    ) {
+      const arrayBuffer = await file.arrayBuffer()
+      const result = await mammoth.extractRawText({ arrayBuffer })
+      return result.value
+    }
+
+    return file.text()
   }
 
   function handleVolunteerFieldChange(
@@ -200,9 +347,15 @@ function App() {
     }))
   }
 
+  function handleResumeFileChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const nextFile = event.target.files?.[0] ?? null
+    setResumeFile(nextFile)
+  }
+
   async function handleManagerGenerate(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
     setManagerMessage('')
+    setLastSendFailures([])
     setDraftPreview('')
     setIsGeneratingMatches(true)
 
@@ -249,39 +402,51 @@ function App() {
       return
     }
 
-    const outreachRows = volunteers.map((volunteer) => {
-      return {
-        request_id: requestData.id,
-        volunteer_id: volunteer.id,
-        email_subject: `Volunteer opportunity: ${trimmedRequest.slice(0, 60)}`,
-        email_body:
-          `Hi ${volunteer.first_name},\n\n` +
-          `We think you could be a great fit for this opportunity: "${trimmedRequest}".\n` +
-          `Would you be open to helping?\n\n` +
-          'Thank you,\nNonprofit Team',
-        match_score: 0,
-        send_status: 'draft',
+    const { data: aiData, error: aiError } = await supabase.functions.invoke(
+      'generate-outreach-ai',
+      {
+        body: {
+          requestId: requestData.id,
+          requestText: trimmedRequest,
+          volunteers,
+        },
+      },
+    )
+
+    if (aiError) {
+      let detailedMessage = aiError.message
+      const context = (aiError as { context?: Response }).context
+      if (context) {
+        try {
+          const details = (await context.json()) as { error?: string }
+          if (details.error) {
+            detailedMessage = details.error
+          }
+        } catch {
+          // Keep generic message when no JSON body is available.
+        }
       }
-    })
 
-    const { error: outreachError } = await supabase
-      .from('outreach_messages')
-      .insert(outreachRows)
-
-    if (outreachError) {
-      setManagerMessage(`Request saved, but failed to create drafts: ${outreachError.message}`)
+      setManagerMessage(
+        `Request saved, but failed to generate AI drafts: ${detailedMessage}`,
+      )
       await loadManagerHistory()
       setIsGeneratingMatches(false)
       return
     }
 
+    const aiResult = (aiData as GenerateOutreachAiResult | null) ?? {
+      generatedCount: 0,
+      drafts: [],
+      usedModel: 'fallback-template',
+    }
+
     setMatchedVolunteers(volunteers)
     setSelectedVolunteerIds(volunteers.map((volunteer) => volunteer.id))
-    setDraftPreview(
-      `Hi ${volunteers[0].first_name}, we think you are a strong match for: "${trimmedRequest}".`,
-    )
+    const firstDraft = aiResult.drafts[0]
+    setDraftPreview(firstDraft?.email_body ?? 'No draft generated yet.')
     setManagerMessage(
-      `Success: request saved and ${volunteers.length} outreach draft(s) created.`,
+      `Success: request saved and ${aiResult.generatedCount} draft(s) created using ${aiResult.usedModel}.${aiResult.fallbackReason ? ` Fallback reason: ${aiResult.fallbackReason}` : ''}`,
     )
     await loadManagerHistory()
     setIsGeneratingMatches(false)
@@ -299,6 +464,7 @@ function App() {
 
   async function handleSendSelectedMatched() {
     setManagerMessage('')
+    setLastSendFailures([])
 
     if (!lastGeneratedRequestId) {
       setManagerMessage('Error: Generate matches first before sending outreach.')
@@ -320,29 +486,50 @@ function App() {
     })
 
     if (error) {
-      setManagerMessage(`Error sending outreach: ${error.message}`)
+      let detailedMessage = error.message
+      const context = (error as { context?: Response }).context
+      if (context) {
+        try {
+          const details = (await context.json()) as { error?: string }
+          if (details.error) {
+            detailedMessage = details.error
+          }
+        } catch {
+          // Keep generic message when no JSON body is available.
+        }
+      }
+
+      setManagerMessage(`Error sending outreach: ${detailedMessage}`)
       setIsSendingOutreach(false)
       return
     }
 
-    const sentCount = typeof data?.sentCount === 'number' ? data.sentCount : 0
-    const failedCount = typeof data?.failedCount === 'number' ? data.failedCount : 0
-    const failedVolunteerIds = Array.isArray(data?.failures)
-      ? data.failures
-          .map((failure: { volunteerId?: string }) => failure.volunteerId)
-          .filter((volunteerId: string | undefined): volunteerId is string =>
-            Boolean(volunteerId),
-          )
-      : []
+    const result = (data as SendOutreachResult | null) ?? {
+      sentCount: 0,
+      failedCount: 0,
+      failures: [],
+    }
+
+    const failedVolunteerIds = result.failures.map((failure) => failure.volunteerId)
 
     setManagerMessage(
-      failedCount > 0
-        ? `Sent ${sentCount} email(s). ${failedCount} failed; those are still selected so you can retry.`
-        : `Success: sent ${sentCount} email(s) to selected volunteer(s).`,
+      result.failedCount > 0
+        ? `Sent ${result.sentCount} email(s). ${result.failedCount} failed; those are still selected so you can retry.`
+        : `Success: sent ${result.sentCount} email(s) to selected volunteer(s).`,
     )
+    setLastSendFailures(result.failures)
     setSelectedVolunteerIds(failedVolunteerIds)
     await loadManagerHistory()
     setIsSendingOutreach(false)
+  }
+
+  function getVolunteerDisplayName(volunteerId: string) {
+    const volunteer = matchedVolunteers.find((person) => person.id === volunteerId)
+    if (!volunteer) {
+      return volunteerId
+    }
+
+    return `${volunteer.first_name} ${volunteer.last_name}`
   }
 
   return (
@@ -377,10 +564,10 @@ function App() {
 
       {page === 'volunteers' && (
         <section>
-          <h1>Add Your LinkedIn Profile</h1>
+          <h1>Upload Your Resume</h1>
           <p>
-            Volunteers only need to enter the basics. Everything else should come from
-            the LinkedIn profile.
+            Volunteers enter the basics and upload a resume. The app parses the resume
+            to infer skills, location, and availability.
           </p>
 
           <form onSubmit={handleVolunteerSubmit}>
@@ -428,13 +615,13 @@ function App() {
 
             <p>
               <label>
-                LinkedIn Profile URL
+                Resume File (.pdf, .docx, .txt)
                 <br />
                 <input
-                  type="url"
-                  name="linkedin_url"
-                  value={volunteerForm.linkedin_url}
-                  onChange={handleVolunteerFieldChange}
+                  key={resumeInputKey}
+                  type="file"
+                  accept=".txt,.md,.rtf,.pdf,.docx"
+                  onChange={handleResumeFileChange}
                   required
                 />
               </label>
@@ -460,7 +647,8 @@ function App() {
                   <strong>
                     {volunteer.first_name} {volunteer.last_name}
                   </strong>{' '}
-                  - {volunteer.email} - {volunteer.linkedin_url}
+                  - {volunteer.email} - {volunteer.skills.join(', ') || 'No skills yet'} -{' '}
+                  {volunteer.location ?? 'No location yet'}
                 </li>
               ))}
             </ul>
@@ -580,6 +768,19 @@ function App() {
           >
             {isSendingOutreach ? 'Sending...' : 'Send to selected matched people'}
           </button>
+
+          {lastSendFailures.length > 0 && (
+            <>
+              <h2>Send Failures</h2>
+              <ul>
+                {lastSendFailures.map((failure) => (
+                  <li key={`${failure.volunteerId}-${failure.error}`}>
+                    {getVolunteerDisplayName(failure.volunteerId)} - {failure.error}
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
         </section>
       )}
     </main>

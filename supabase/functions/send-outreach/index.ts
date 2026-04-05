@@ -74,9 +74,15 @@ Deno.serve(async (req) => {
     },
   })
 
-  const body = (await req.json()) as SendOutreachRequest
+  let body: SendOutreachRequest
+  try {
+    body = (await req.json()) as SendOutreachRequest
+  } catch {
+    return jsonResponse({ error: 'Invalid JSON body.' }, 400)
+  }
+
   const requestId = body.requestId?.trim()
-  const volunteerIds = body.volunteerIds ?? []
+  const volunteerIds = Array.from(new Set(body.volunteerIds ?? []))
 
   if (!requestId || volunteerIds.length === 0) {
     return jsonResponse({ error: 'requestId and volunteerIds are required.' }, 400)
@@ -86,10 +92,14 @@ Deno.serve(async (req) => {
     .from('volunteer_requests')
     .select('id, request_text')
     .eq('id', requestId)
-    .single()
+    .maybeSingle()
 
-  if (requestError || !requestRow) {
-    return jsonResponse({ error: requestError?.message ?? 'Request not found.' }, 404)
+  if (requestError) {
+    return jsonResponse({ error: requestError.message }, 500)
+  }
+
+  if (!requestRow) {
+    return jsonResponse({ error: 'Request not found.' }, 404)
   }
 
   const { data: drafts, error: draftsError } = await supabase
