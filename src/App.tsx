@@ -631,7 +631,7 @@ function App() {
       <header className="topbar">
         <div className="brand-lockup">
           <div className="brand-logo-wrap" aria-hidden="true">
-            <img src="/sap-logo.png" alt="" className="brand-logo" />
+            <img src="/SAP_2011_logo.svg.png" alt="SAP logo" className="brand-logo" />
           </div>
           <div>
             <p className="eyebrow">Strengthening BC&apos;s Nonprofit Workforce</p>
