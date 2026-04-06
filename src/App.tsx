@@ -323,7 +323,7 @@ function App() {
 
     const { data: insertedVolunteer, error: insertError } = await supabase
       .from('volunteers')
-      .insert(payload)
+      .upsert(payload, { onConflict: 'email' })
       .select('id')
       .single()
 
